@@ -1,0 +1,128 @@
+# -*- coding:UTF-8 -*-
+from scrapy.spider import BaseSpider
+from scrapy.selector import HtmlXPathSelector
+from scrapy.http import Request
+from scrapy.http import FormRequest
+from scrapy.conf import settings
+from scrapy.xlib.pydispatch import dispatcher
+from pymongo import Connection 
+import datetime,time,re,string
+from scrapy import signals
+import pymongo
+def connect():
+    import sys
+    reload(sys)
+    sys.setdefaultencoding('utf8')
+    conn = pymongo.Connection()
+    return conn.cnwdlm
+
+class RenJuSpider(BaseSpider):
+    '''
+    人人聚财贷爬虫.编号:NO.8,此虫特点：取出各元素集合，如titles
+    '''
+
+    name = 'renju'
+    allowed_domains = ['renrenmoney.com']
+    start_urls = ['http://www.renrenmoney.com/tender/index.html']
+
+    def get_sql(self, block):
+        name = block.select("td[2]/ul/li[1]/a/text()").extract()[0].strip()
+        borrow_id = block.select("td[2]/ul/li[1]/a/@href").extract()[0].split('/')[-1].split('.')[0][1:].strip()
+        url = 'http://www.renrenmoney.com/invest/a' + borrow_id + '.html'
+        money = ''.join([ i for i in block.select("td[3]/ul/li[1]/font/text()").extract()[0].strip() if i.isdigit() or i=='.'])
+        money = float(money)
+        money = int(money)
+        # 年化，double类型
+        temp = block.select("td[3]/ul/li[2]/font/text()").extract()[0]
+        apr = temp.split(u'，')[0].strip()[:-1].strip()
+        apr = float(apr)
+        #print title + '  ' + borrow_id + '  ' + url + '  '+ money + '   '  + apr 
+        ## 还款类型： eg. 按月分期还款
+        repayment_type = block.select("td[5]/ul/li[2]/text()").extract()[0][5:].strip()
+        ## 交易类型 eg.在线交易
+        transaction_type = ''
+        ## 借款期限 eg.1天  1个月  varchar类型
+        loan_period = temp.split(u'，')[-1].strip()
+        loan_period = re.search(r'\d+',loan_period).group()
+        loan_period = int(loan_period)
+        ## 借款时间 eg: YYYY-mm-dd HH:ii:ss
+        create_time = time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time()))
+        ## 借款进度 double类型
+        rate_of_process = block.select("td[4]/ul/li[2]/span/text()").extract()[0].split('%')[0].strip() 
+        rate_of_process = float(rate_of_process)
+        # print borrow_id,url,money,apr,repayment_type,loan_period,rate_of_process,create_time,company_name,name
+        data ={"_id":url,"apr":apr,"money":money,"rate_of_process":rate_of_process,"create_time":create_time,"name":name,"link_url":url,"loan_period":loan_period,"borrow_id":borrow_id,"repayment_type":repayment_type,"flag":3,"company_name":'人人聚财'}
+        connect().bids.save(data)
+
+    def parse(self, response):
+        hxs = HtmlXPathSelector(response)
+        biaos = hxs.select("//div[@id='intd1']/div[@class='invest_list']/table/tr[@class='tr1']")
+        for biao in biaos:
+            self.get_sql(biao)
+
+
+class HLingSpider(BaseSpider):
+    '''
+    红岭爬虫.编号NO.3，该爬虫特点，模拟登录，模拟post请求获取各页内容，然后吞噬数据！
+    '''
+
+    name = 'hling'
+    
+    allowed_domains = ['www.my089.com']
+    start_urls = ['https://www.my089.com/login.aspx']
+
+    def parse(self, response):
+        return [FormRequest.from_response(response, formdata={'ctl00$ctl00$ContentPlaceHolder1$ContentPlaceHolder1$txtUserName':'klokkl','ctl00$ctl00$ContentPlaceHolder1$ContentPlaceHolder1$txtPwd':'klokkl'},callback = self.after_login)]
+    
+    def after_login(self, response):
+        yield Request(url='http://www.my089.com/Loan/Default.aspx',callback = self.parse_list)
+
+    def parse_list(self, response):
+        hxs = HtmlXPathSelector(response)
+        vs = hxs.select("//body/form//input[@id='__VIEWSTATE']/@value").extract()[0]
+        ea = hxs.select("//body/form//input[@id='__EVENTVALIDATION']/@value").extract()[0]
+        count =  len(list(hxs.select("//div[@id='main']/div[2]/div[2]/div/div/div/a")))# count of page
+        count = string.atoi(str(count))# 获取 页码数
+        # 提交每页的 请求
+        for i in xrange(count):
+            yield FormRequest(url='http://www.my089.com/Loan/Default.aspx', formdata = {
+                                '__EVENTTARGET':'ctl00$ctl00$ContentPlaceHolder1$ContentPlaceHolder1$Pagination1$lBtn'+str(i+1),
+                                '__EVENTARGUMENT':'',
+                                '__EVENTVALIDATION':ea,
+                                '__VIEWSTATE':vs,
+                                },
+                                callback = self.parse_test)
+    def parse_test(self, response):
+        hx = HtmlXPathSelector(response)
+        items = hx.select("//div[@id='main']/div[2]/div[2]/table/tr")
+        for item in items:
+            #标题
+            title = item.select("td/div/dl/dt/span[1]/a/text()").extract()[0]
+            # 标种
+    
+            try:
+                type_id = settings['hling_' + item.select("td/div/dl/dt/a/@class").extract()[0]]
+            except:
+                type_id = settings['qitabiao']
+            #金钱 （格式化）
+            money = ''.join([ i for i in item.select("td/div/span/text()").extract()[0].strip() if i.isdigit() or i=='.' ])
+            # 年化
+            apr_temp = item.select("td/div/span/text()").extract()[1].strip()
+            apr = apr_temp[3:-3] if apr_temp[-1]==u'年' else string.atof(apr_temp[3:-3])*12
+            #借款期限
+            loan_period = item.select("td/div/span/text()").extract()[7].strip()
+            loan_period = re.search(r'\d+',loan_period).group()
+            loan_period = float(loan_period)
+            #借款进度
+            rate_of_process = item.select("td/div/span[2]/span/span/text()").extract()[0].strip()[:-1]
+            rate_of_process = int(rate_of_process)
+            #还款方式
+            repayment_manner = item.select("td/div/span[3]/span/text()").extract()[0].strip()
+            #链接
+            url = "http://www.my089.com" + item.select("td/div/dl/dt/span[1]/a/@href").extract()[0]
+            #借款ID
+            borrow_id = url.split('=')[1]
+            create_time = time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time()))
+            # print title,money,apr,loan_period,rate_of_process
+            data ={'_id':url,'borrow_id':borrow_id,'repayment_manner':repayment_manner,'company_name':'红岭','link_url':url,'name':title,'money':money,'apr':apr,'loan_period':loan_period,'rate_of_process':rate_of_process,'borrow_type':"流转标",'flag':2,'create_time':create_time}
+            connect().bids.insert(data)
